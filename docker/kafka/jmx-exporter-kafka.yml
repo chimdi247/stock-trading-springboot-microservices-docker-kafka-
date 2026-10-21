@@ -1,0 +1,80 @@
+# Prometheus JMX exporter rules for a Kafka broker.
+# Metric names are deliberately flat and explicit — the Kafka dashboard in
+# observability/grafana/dashboards/kafka.json is built on exactly these.
+lowercaseOutputName: true
+lowercaseOutputLabelNames: true
+rules:
+  # ── Throughput (broker totals) ────────────────────────────────────
+  - pattern: 'kafka.server<type=BrokerTopicMetrics, name=(MessagesInPerSec|BytesInPerSec|BytesOutPerSec|BytesRejectedPerSec|TotalProduceRequestsPerSec|TotalFetchRequestsPerSec|FailedProduceRequestsPerSec|FailedFetchRequestsPerSec)><>Count'
+    name: kafka_server_brokertopicmetrics_$1_total
+    type: COUNTER
+
+  # ── Throughput (per topic) ────────────────────────────────────────
+  - pattern: 'kafka.server<type=BrokerTopicMetrics, name=(MessagesInPerSec|BytesInPerSec|BytesOutPerSec), topic=(.+)><>Count'
+    name: kafka_server_brokertopicmetrics_topic_$1_total
+    type: COUNTER
+    labels:
+      topic: "$2"
+
+  # ── Replication health ────────────────────────────────────────────
+  - pattern: 'kafka.server<type=ReplicaManager, name=(UnderReplicatedPartitions|UnderMinIsrPartitionCount|PartitionCount|LeaderCount|AtMinIsrPartitionCount)><>Value'
+    name: kafka_server_replicamanager_$1
+    type: GAUGE
+  - pattern: 'kafka.server<type=ReplicaManager, name=(IsrShrinksPerSec|IsrExpandsPerSec)><>Count'
+    name: kafka_server_replicamanager_$1_total
+    type: COUNTER
+
+  # ── Controller ────────────────────────────────────────────────────
+  - pattern: 'kafka.controller<type=KafkaController, name=(OfflinePartitionsCount|ActiveControllerCount|GlobalPartitionCount|GlobalTopicCount|PreferredReplicaImbalanceCount)><>Value'
+    name: kafka_controller_kafkacontroller_$1
+    type: GAUGE
+  - pattern: 'kafka.controller<type=ControllerStats, name=(UncleanLeaderElectionsPerSec|LeaderElectionRateAndTimeMs)><>Count'
+    name: kafka_controller_controllerstats_$1_total
+    type: COUNTER
+
+  # ── Broker state (3 = running) ────────────────────────────────────
+  - pattern: 'kafka.server<type=KafkaServer, name=BrokerState><>Value'
+    name: kafka_server_kafkaserver_brokerstate
+    type: GAUGE
+
+  # ── Request rate and latency (Produce / FetchConsumer / FetchFollower) ──
+  - pattern: 'kafka.network<type=RequestMetrics, name=RequestsPerSec, request=(Produce|FetchConsumer|FetchFollower), version=(.+)><>Count'
+    name: kafka_network_requestmetrics_requests_total
+    type: COUNTER
+    labels:
+      request: "$1"
+  - pattern: 'kafka.network<type=RequestMetrics, name=(TotalTimeMs|RequestQueueTimeMs|LocalTimeMs|RemoteTimeMs|ResponseQueueTimeMs|ResponseSendTimeMs), request=(Produce|FetchConsumer|FetchFollower)><>(Mean|50thPercentile|95thPercentile|99thPercentile|Max)'
+    name: kafka_network_requestmetrics_$1
+    type: GAUGE
+    labels:
+      request: "$2"
+      stat: "$3"
+
+  # ── Threads / saturation ──────────────────────────────────────────
+  - pattern: 'kafka.network<type=SocketServer, name=NetworkProcessorAvgIdlePercent><>Value'
+    name: kafka_network_socketserver_networkprocessoravgidlepercent
+    type: GAUGE
+  - pattern: 'kafka.server<type=KafkaRequestHandlerPool, name=RequestHandlerAvgIdlePercent><>OneMinuteRate'
+    name: kafka_server_requesthandleravgidlepercent
+    type: GAUGE
+  - pattern: 'kafka.network<type=RequestChannel, name=(RequestQueueSize|ResponseQueueSize)><>Value'
+    name: kafka_network_requestchannel_$1
+    type: GAUGE
+
+  # ── Disk: on-disk size of every partition log ─────────────────────
+  - pattern: 'kafka.log<type=Log, name=Size, topic=(.+), partition=(.+)><>Value'
+    name: kafka_log_size_bytes
+    type: GAUGE
+    labels:
+      topic: "$1"
+      partition: "$2"
+
+  # ── Consumer group coordinator ────────────────────────────────────
+  - pattern: 'kafka.server<type=group-coordinator-metrics, name=(.+)><>(.+)'
+    name: kafka_server_groupcoordinator_$1
+    type: GAUGE
+
+  # ── Host-level info the JVM exposes ───────────────────────────────
+  - pattern: 'java.lang<type=OperatingSystem><>(OpenFileDescriptorCount|MaxFileDescriptorCount)'
+    name: kafka_os_$1
+    type: GAUGE

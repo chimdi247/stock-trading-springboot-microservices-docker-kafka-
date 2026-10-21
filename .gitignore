@@ -1,0 +1,11 @@
+target/
+node_modules/
+dist/
+.idea/
+*.iml
+.env
+__pycache__/
+*.pyc
+tests/e2e/playwright-report/
+tests/e2e/test-results/
+tests/performance/results/*.json

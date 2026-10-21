@@ -1,0 +1,176 @@
+apiVersion: 1
+
+# Grafana-managed alert rules (evaluated by Grafana, delivered by e-mail via the
+# SMTP settings in grafana.ini). Thresholds come from .env -> ALERT_CPU_THRESHOLD /
+# ALERT_MEM_THRESHOLD (default 40).
+#
+# CPU %    = CPU used / CPU limit of the container (compose `cpus:`)
+# Memory % = working-set memory / memory limit of the container (compose `mem_limit:`)
+# Only containers that HAVE a limit are evaluated (all app + data containers do).
+
+groups:
+  - orgId: 1
+    name: resource-usage
+    folder: Trading Alerts
+    interval: 1m
+    rules:
+
+      # ─────────────────────── Container CPU > 40% ───────────────────────
+      - uid: container-cpu-high
+        title: Container CPU above threshold
+        condition: C
+        for: 2m
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: 'CPU on container {{ $$labels.name }} is above ${ALERT_CPU_THRESHOLD}%'
+          description: 'Container {{ $$labels.name }} is using {{ printf "%.1f" $$values.B.Value }}% of its CPU limit (threshold ${ALERT_CPU_THRESHOLD}%).'
+        labels:
+          severity: warning
+          scope: container
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                100 * sum by (name) (rate(container_cpu_usage_seconds_total{name!=""}[2m]))
+                / on (name)
+                sum by (name) (container_spec_cpu_quota{name!=""} / container_spec_cpu_period{name!=""} > 0)
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+              settings: { mode: dropNN }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [${ALERT_CPU_THRESHOLD}] }
+
+      # ─────────────────────── Container memory > 40% ───────────────────────
+      - uid: container-memory-high
+        title: Container memory above threshold
+        condition: C
+        for: 2m
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: 'Memory on container {{ $$labels.name }} is above ${ALERT_MEM_THRESHOLD}%'
+          description: 'Container {{ $$labels.name }} is using {{ printf "%.1f" $$values.B.Value }}% of its memory limit (threshold ${ALERT_MEM_THRESHOLD}%).'
+        labels:
+          severity: warning
+          scope: container
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                100 * max by (name) (container_memory_working_set_bytes{name!=""})
+                / on (name)
+                max by (name) (container_spec_memory_limit_bytes{name!=""} > 0)
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+              settings: { mode: dropNN }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [${ALERT_MEM_THRESHOLD}] }
+
+      # ─────────────────────── Node (host) CPU > 40% ───────────────────────
+      - uid: node-cpu-high
+        title: Node CPU above threshold
+        condition: C
+        for: 2m
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: 'Node CPU is above ${ALERT_CPU_THRESHOLD}%'
+          description: 'Host CPU utilisation is {{ printf "%.1f" $$values.B.Value }}% (threshold ${ALERT_CPU_THRESHOLD}%).'
+        labels:
+          severity: warning
+          scope: node
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[2m])))
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+              settings: { mode: dropNN }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [${ALERT_CPU_THRESHOLD}] }
+
+      # ─────────────────────── Node (host) memory > 40% ───────────────────────
+      - uid: node-memory-high
+        title: Node memory above threshold
+        condition: C
+        for: 2m
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: 'Node memory is above ${ALERT_MEM_THRESHOLD}%'
+          description: 'Host memory utilisation is {{ printf "%.1f" $$values.B.Value }}% (threshold ${ALERT_MEM_THRESHOLD}%).'
+        labels:
+          severity: warning
+          scope: node
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+              settings: { mode: dropNN }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [${ALERT_MEM_THRESHOLD}] }

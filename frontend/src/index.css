@@ -1,0 +1,33 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body, #root { height: 100%; }
+  body { font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11'; }
+  ::selection { background: rgba(45, 212, 191, .3); }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: #26374f; border-radius: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+}
+
+@layer components {
+  .card { @apply rounded-2xl border border-ink-700/70 bg-ink-850/80 backdrop-blur-sm shadow-lg shadow-black/20; }
+  .card-pad { @apply p-5; }
+  .input {
+    @apply w-full rounded-xl border border-ink-600 bg-ink-900 px-3.5 py-2.5 text-sm text-slate-100 placeholder-slate-500
+           outline-none transition focus:border-brand-500 focus:ring-2 focus:ring-brand-500/30;
+  }
+  .label { @apply mb-1.5 block text-xs font-medium uppercase tracking-wide text-slate-400; }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition
+           disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/60;
+  }
+  .btn-primary { @apply btn bg-brand-500 text-ink-950 hover:bg-brand-400 shadow-glow; }
+  .btn-ghost { @apply btn border border-ink-600 text-slate-200 hover:bg-ink-700/60; }
+  .btn-buy { @apply btn bg-gain text-ink-950 hover:brightness-110; }
+  .btn-sell { @apply btn bg-loss text-white hover:brightness-110; }
+  .th { @apply px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-400; }
+  .td { @apply px-4 py-3.5 text-sm; }
+  .num { @apply font-mono tabular-nums; }
+}

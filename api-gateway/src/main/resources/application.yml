@@ -1,0 +1,75 @@
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      routes:
+
+        # ── PUBLIC — no JWT ──
+        - id: user-service-public
+          uri: ${USER_SERVICE_URL:http://localhost:8081}
+          predicates:
+            - Path=/api/v1/users/register,/api/v1/users/login
+
+        # ── USER SERVICE — JWT required ──
+        - id: user-service
+          uri: ${USER_SERVICE_URL:http://localhost:8081}
+          predicates:
+            - Path=/api/v1/users/**
+          filters:
+            - name: JwtAuthFilter
+
+        # ── MARKET DATA — JWT required ──
+        - id: market-data-service
+          uri: ${MARKET_SERVICE_URL:http://localhost:8082}
+          predicates:
+            - Path=/api/v1/market/**
+          filters:
+            - name: JwtAuthFilter
+
+        # ── WEBSOCKET — no JWT (handled separately) ──
+        # NOTE: uses http:// (not ws://) on purpose. SockJS first makes plain
+        # HTTP calls (/ws/info, xhr fallbacks) and only then upgrades. Spring
+        # Cloud Gateway switches the scheme to ws:// automatically when it
+        # sees an Upgrade request, so one http:// route serves both.
+        - id: market-websocket
+          uri: ${MARKET_SERVICE_URL:http://localhost:8082}
+          predicates:
+            - Path=/ws/**
+
+        # ── ORDER SERVICE — JWT required ──
+        - id: order-service
+          uri: ${ORDER_SERVICE_URL:http://localhost:8083}
+          predicates:
+            - Path=/api/v1/orders/**
+          filters:
+            - name: JwtAuthFilter
+
+        # ── PORTFOLIO SERVICE — JWT required ──
+        - id: portfolio-service
+          uri: ${PORTFOLIO_SERVICE_URL:http://localhost:8084}
+          predicates:
+            - Path=/api/v1/portfolio/**
+          filters:
+            - name: JwtAuthFilter
+
+server:
+  port: 8080
+
+# JWT secret — must match user-service secret exactly
+jwt:
+  secret: ${JWT_SECRET:404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,gateway
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+logging:
+  pattern:
+    level: "%5p [${spring.application.name:},%X{trace_id:-},%X{span_id:-}]"

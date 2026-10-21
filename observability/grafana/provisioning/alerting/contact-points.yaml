@@ -1,0 +1,14 @@
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: email-oncall
+    receivers:
+      - uid: email-oncall-receiver
+        type: email
+        is_default: true
+        settings:
+          # Comma/semicolon separated. Set ALERT_EMAIL_TO in .env
+          addresses: ${ALERT_EMAIL_TO}
+          singleEmail: false
+          subject: '[{{ .Status | toUpper }}] {{ .CommonLabels.alertname }} {{ if .CommonLabels.name }}({{ .CommonLabels.name }}){{ end }}'

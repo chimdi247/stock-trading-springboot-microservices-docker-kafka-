@@ -1,0 +1,632 @@
+# =====================================================================
+#  Stock Trading Platform — full stack in ONE compose file
+#
+#    docker compose up -d --build
+#
+#  App            http://localhost:3000        login: admin@example.com / password123
+#  API gateway    http://localhost:8080
+#  Grafana        http://localhost:3001        admin / admin
+#  Prometheus     http://localhost:9090
+#  Kafka UI       http://localhost:8090
+#  Redis UI       http://localhost:8091
+#  Mailpit (SMTP) http://localhost:8025        (alert e-mails land here)
+# =====================================================================
+name: stock-trading
+
+# ─────────────────────────  shared fragments  ─────────────────────────
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+# OpenTelemetry settings common to every JVM service. The rest (propagators,
+# semconv, exporter protocol, toggles) lives in observability/otel/otel-javaagent.properties
+x-otel-java-env: &otel-java-env
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+  OTEL_JAVAAGENT_CONFIGURATION_FILE: /otel/otel-javaagent.properties
+  OTEL_RESOURCE_ATTRIBUTES: service.namespace=trading,deployment.environment=docker
+
+x-java-service: &java-service
+  restart: unless-stopped
+  networks: [trading-network]
+  logging: *default-logging
+  mem_limit: 768m
+  cpus: 1.5
+  volumes:
+    - ./observability/otel/otel-javaagent.properties:/otel/otel-javaagent.properties:ro
+
+# DB settings: every service talks to MySQL THROUGH ProxySQL (pooling/multiplexing).
+# JPA_DDL_AUTO=none because docker/mysql/init/02-schema.sql owns the schema.
+x-db-env: &db-env
+  DB_USERNAME: trading_app
+  DB_PASSWORD: trading_pass
+  JPA_DDL_AUTO: none
+  JPA_SHOW_SQL: "false"
+
+services:
+
+  # ═══════════════════════════  DATA TIER  ═══════════════════════════
+
+  mysql:
+    image: mysql:8.0
+    container_name: mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-name-resolve
+      - --max-connections=300
+      - --innodb-buffer-pool-size=256M
+      - --performance-schema=ON
+      - --slow-query-log=ON
+      - --long-query-time=0.5
+    ports:
+      - "127.0.0.1:3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # Runs ONCE on an empty volume: databases/users -> schema -> admin seed
+      - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
+    networks: [trading-network]
+    logging: *default-logging
+    mem_limit: 768m
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -proot --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # Connection pooling + multiplexing (+ query routing) in front of MySQL
+  proxysql:
+    image: proxysql/proxysql:3.0.3
+    container_name: proxysql
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:6033:6033"   # MySQL protocol (apps)
+      - "127.0.0.1:6032:6032"   # admin console (radmin / radmin)
+    volumes:
+      - ./docker/proxysql/proxysql.cnf:/etc/proxysql.cnf:ro
+    networks: [trading-network]
+    logging: *default-logging
+    mem_limit: 256m
+    healthcheck:
+      # TCP probe of the REST/metrics port (avoids polluting MySQL-protocol counters)
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/6070'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - ./docker/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    networks: [trading-network]
+    logging: *default-logging
+    mem_limit: 192m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Kafka in KRaft mode (no Zookeeper) + JMX exporter java agent on :7071
+  kafka:
+    build:
+      context: ./docker/kafka
+    image: trading/kafka:7.4.0-jmx
+    container_name: kafka
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://kafka:29092,CONTROLLER://kafka:9093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_HEAP_OPTS: "-Xms512m -Xmx512m"
+      # JMX exporter as a java agent -> http://kafka:7071/metrics
+      KAFKA_OPTS: "-javaagent:/opt/jmx/jmx_prometheus_javaagent.jar=7071:/opt/jmx/kafka.yml"
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    networks: [trading-network]
+    logging: *default-logging
+    mem_limit: 1280m
+    healthcheck:
+      # KAFKA_OPTS is cleared for the CLI, otherwise the CLI JVM would try to
+      # start a second JMX agent on :7071 and fail.
+      test: ["CMD-SHELL", "KAFKA_OPTS= kafka-topics --bootstrap-server localhost:9092 --list"]
+      interval: 15s
+      timeout: 15s
+      retries: 10
+      start_period: 40s
+
+  # One-shot job: create topics up front so consumers / dashboards see them immediately
+  kafka-init:
+    build:
+      context: ./docker/kafka
+    image: trading/kafka:7.4.0-jmx
+    container_name: kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+    networks: [trading-network]
+    environment:
+      KAFKA_OPTS: ""
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        for t in user.registered stock.price.updated order.executed order.failed order.flagged; do
+          kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists \
+            --topic $$t --partitions 3 --replication-factor 1
+        done
+        echo "Topics ready:" && kafka-topics --bootstrap-server kafka:29092 --list
+
+  # ═══════════════════════  DATA TIER — web UIs  ═══════════════════════
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    container_name: kafka-ui
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: trading-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      DYNAMIC_CONFIG_ENABLED: "true"
+    networks: [trading-network]
+    logging: *default-logging
+
+  redis-ui:
+    image: rediscommander/redis-commander:latest
+    container_name: redis-ui
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8091:8081"
+    environment:
+      REDIS_HOSTS: local:redis:6379
+    networks: [trading-network]
+    logging: *default-logging
+
+  # ═══════════════════════  APPLICATION TIER  ═══════════════════════
+
+  api-gateway:
+    <<: *java-service
+    build:
+      context: ./api-gateway
+    image: trading/api-gateway:latest
+    container_name: api-gateway
+    depends_on:
+      user-service:
+        condition: service_started
+      market-data-service:
+        condition: service_started
+      order-service:
+        condition: service_started
+      portfolio-service:
+        condition: service_started
+    ports:
+      - "8080:8080"
+    environment:
+      <<: *otel-java-env
+      OTEL_SERVICE_NAME: api-gateway
+      JWT_SECRET: ${JWT_SECRET}
+      USER_SERVICE_URL: http://user-service:8081
+      MARKET_SERVICE_URL: http://market-data-service:8082
+      ORDER_SERVICE_URL: http://order-service:8083
+      PORTFOLIO_SERVICE_URL: http://portfolio-service:8084
+
+  user-service:
+    <<: *java-service
+    build:
+      context: ./user-service
+    image: trading/user-service:latest
+    container_name: user-service
+    depends_on:
+      proxysql:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    ports:
+      - "127.0.0.1:8081:8081"
+    environment:
+      <<: [*otel-java-env, *db-env]
+      OTEL_SERVICE_NAME: user-service
+      DB_URL: "jdbc:mysql://proxysql:6033/user_db?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8"
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      JWT_SECRET: ${JWT_SECRET}
+
+  market-data-service:
+    <<: *java-service
+    build:
+      context: ./market-data-service
+    image: trading/market-data-service:latest
+    container_name: market-data-service
+    depends_on:
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    ports:
+      - "127.0.0.1:8082:8082"
+    environment:
+      <<: *otel-java-env
+      OTEL_SERVICE_NAME: market-data-service
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+
+  order-service:
+    <<: *java-service
+    build:
+      context: ./order-service
+    image: trading/order-service:latest
+    container_name: order-service
+    depends_on:
+      proxysql:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      user-service:
+        condition: service_started
+      market-data-service:
+        condition: service_started
+      ai-service:
+        condition: service_started
+      otel-collector:
+        condition: service_started
+    ports:
+      - "127.0.0.1:8083:8083"
+    environment:
+      <<: [*otel-java-env, *db-env]
+      OTEL_SERVICE_NAME: order-service
+      DB_URL: "jdbc:mysql://proxysql:6033/order_db?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8"
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      USER_SERVICE_URL: http://user-service:8081
+      MARKET_SERVICE_URL: http://market-data-service:8082
+      AI_SERVICE_URL: http://ai-service:8086
+
+  portfolio-service:
+    <<: *java-service
+    build:
+      context: ./portfolio-service
+    image: trading/portfolio-service:latest
+    container_name: portfolio-service
+    depends_on:
+      proxysql:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      market-data-service:
+        condition: service_started
+      otel-collector:
+        condition: service_started
+    ports:
+      - "127.0.0.1:8084:8084"
+    environment:
+      <<: [*otel-java-env, *db-env]
+      OTEL_SERVICE_NAME: portfolio-service
+      DB_URL: "jdbc:mysql://proxysql:6033/portfolio_db?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8"
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      MARKET_SERVICE_URL: http://market-data-service:8082
+
+  notification-service:
+    <<: *java-service
+    build:
+      context: ./notification-service
+    image: trading/notification-service:latest
+    container_name: notification-service
+    depends_on:
+      kafka:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    ports:
+      - "127.0.0.1:8085:8085"
+    environment:
+      <<: *otel-java-env
+      OTEL_SERVICE_NAME: notification-service
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+
+  ai-service:
+    build:
+      context: ./ai-service
+    image: trading/ai-service:latest
+    container_name: ai-service
+    restart: unless-stopped
+    depends_on:
+      otel-collector:
+        condition: service_started
+    ports:
+      - "127.0.0.1:8086:8086"
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # OpenTelemetry (python): `opentelemetry-instrument` reads these
+      OTEL_SERVICE_NAME: ai-service
+      OTEL_RESOURCE_ATTRIBUTES: service.namespace=trading,deployment.environment=docker
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_TRACES_EXPORTER: otlp
+      OTEL_METRICS_EXPORTER: otlp
+      OTEL_LOGS_EXPORTER: otlp
+      OTEL_METRIC_EXPORT_INTERVAL: "10000"
+      OTEL_PROPAGATORS: tracecontext,baggage
+      OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED: "true"
+      OTEL_PYTHON_LOG_CORRELATION: "true"
+      OTEL_SEMCONV_STABILITY_OPT_IN: http
+      OTEL_PYTHON_EXCLUDED_URLS: health
+    networks: [trading-network]
+    logging: *default-logging
+    mem_limit: 384m
+    cpus: 1.0
+
+  frontend:
+    build:
+      context: ./frontend
+    image: trading/frontend:latest
+    container_name: frontend
+    restart: unless-stopped
+    depends_on:
+      api-gateway:
+        condition: service_started
+    ports:
+      - "3000:80"
+    networks: [trading-network]
+    logging: *default-logging
+    mem_limit: 128m
+
+  # ═══════════════════════  OBSERVABILITY  ═══════════════════════
+  #  apps ──OTLP──► otel-collector ──► tempo (traces)
+  #                                ├─► loki  (logs)
+  #                                └─► :8889 ◄── prometheus (metrics)
+  #  exporters (cadvisor, node, mysql, redis, kafka, proxysql, blackbox)
+  #                                    ──────────► prometheus ──► grafana
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    container_name: otel-collector
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./observability/otel/otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "127.0.0.1:4317:4317"   # OTLP gRPC
+      - "127.0.0.1:4318:4318"   # OTLP HTTP
+    depends_on:
+      - tempo
+      - loki
+    networks: [trading-network]
+    logging: *default-logging
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+      - --web.enable-remote-write-receiver     # Tempo metrics-generator writes here
+      - --enable-feature=exemplar-storage      # trace exemplars on latency histograms
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    networks: [trading-network]
+    logging: *default-logging
+
+  loki:
+    image: grafana/loki:3.2.1
+    container_name: loki
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/loki-config.yaml"]
+    volumes:
+      - ./observability/loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "127.0.0.1:3100:3100"
+    networks: [trading-network]
+    logging: *default-logging
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    container_name: tempo
+    restart: unless-stopped
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./observability/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "127.0.0.1:3200:3200"
+    networks: [trading-network]
+    logging: *default-logging
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      # Consumed by grafana.ini ($__env{...}) and the alerting provisioning files
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM_ADDRESS: ${SMTP_FROM_ADDRESS:-grafana-alerts@trading.com}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME:-Trading Platform Alerts}
+      SMTP_STARTTLS_POLICY: ${SMTP_STARTTLS_POLICY:-}
+      SMTP_SKIP_VERIFY: ${SMTP_SKIP_VERIFY:-true}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
+      ALERT_CPU_THRESHOLD: ${ALERT_CPU_THRESHOLD:-40}
+      ALERT_MEM_THRESHOLD: ${ALERT_MEM_THRESHOLD:-40}
+    volumes:
+      - ./observability/grafana/grafana.ini:/etc/grafana/grafana.ini:ro
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3001:3000"
+    networks: [trading-network]
+    logging: *default-logging
+
+  # SMTP sink for Grafana alert e-mails (swap for a real SMTP server via .env)
+  mailpit:
+    image: axllent/mailpit:v1.21
+    container_name: mailpit
+    restart: unless-stopped
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "1"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+    ports:
+      - "127.0.0.1:8025:8025"   # web UI
+      - "127.0.0.1:1025:1025"   # SMTP
+    networks: [trading-network]
+    logging: *default-logging
+
+  # ───────────────────────────  exporters  ───────────────────────────
+
+  # Per-container CPU / memory / network / disk
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: cadvisor
+    restart: unless-stopped
+    privileged: true
+    devices:
+      - /dev/kmsg
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=10s
+      - --store_container_labels=false
+      - --whitelisted_container_labels=com.docker.compose.service
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    ports:
+      - "127.0.0.1:8088:8080"
+    networks: [trading-network]
+    logging: *default-logging
+
+  # Host (node) CPU / memory / disk / network
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: node-exporter
+    restart: unless-stopped
+    pid: host
+    command:
+      - --path.rootfs=/host
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)
+    volumes:
+      - /:/host:ro
+    networks: [trading-network]
+    logging: *default-logging
+
+  mysqld-exporter:
+    image: prom/mysqld-exporter:v0.15.1
+    container_name: mysqld-exporter
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command:
+      - --mysqld.address=mysql:3306
+      - --mysqld.username=exporter
+      - --collect.info_schema.innodb_metrics
+      - --collect.info_schema.tables
+      - --collect.perf_schema.eventsstatements
+      - --collect.perf_schema.eventsstatements.limit=100
+    environment:
+      MYSQLD_EXPORTER_PASSWORD: exporter_pass
+    networks: [trading-network]
+    logging: *default-logging
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.62.0
+    container_name: redis-exporter
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_ADDR: redis://redis:6379
+    networks: [trading-network]
+    logging: *default-logging
+
+  # Consumer lag / topic & partition state (broker JMX metrics come from the kafka agent on :7071)
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.7.0
+    container_name: kafka-exporter
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command:
+      - --kafka.server=kafka:29092
+      - --refresh.metadata=30s
+    networks: [trading-network]
+    logging: *default-logging
+
+  # Black-box HTTP probes -> uptime / availability / external latency per service
+  blackbox-exporter:
+    image: prom/blackbox-exporter:v0.25.0
+    container_name: blackbox-exporter
+    restart: unless-stopped
+    volumes:
+      - ./observability/blackbox/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
+    networks: [trading-network]
+    logging: *default-logging
+
+volumes:
+  mysql-data:
+  kafka-data:
+  prometheus-data:
+  loki-data:
+  tempo-data:
+  grafana-data:
+
+networks:
+  trading-network:
+    driver: bridge

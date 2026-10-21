@@ -1,0 +1,9 @@
+fastapi==0.104.1
+uvicorn==0.24.0
+pydantic==2.4.2
+anthropic==0.18.1
+# OpenTelemetry — SDK, OTLP exporter and the `opentelemetry-instrument` launcher.
+# Instrumentation libraries (fastapi, httpx, logging, ...) are installed at image
+# build time with `opentelemetry-bootstrap -a install`.
+opentelemetry-distro==0.48b0
+opentelemetry-exporter-otlp==1.27.0

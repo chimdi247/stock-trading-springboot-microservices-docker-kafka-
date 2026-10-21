@@ -1,0 +1,102 @@
+# =====================================================================
+# OpenTelemetry Collector (contrib)
+#
+#   traces  : OTLP in ──► tempo:4317
+#   logs    : OTLP in ──► loki  (native OTLP endpoint /otlp)
+#   metrics : OTLP in ──► :8889 (Prometheus scrapes it)
+# =====================================================================
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 25
+
+  # Remove high-cardinality / per-restart resource attributes so Prometheus and
+  # Loki labels stay stable (service_name, service_namespace, deployment_environment).
+  resource/clean:
+    attributes:
+      - { key: service.instance.id,         action: delete }
+      - { key: host.name,                   action: delete }
+      - { key: host.arch,                   action: delete }
+      - { key: os.description,              action: delete }
+      - { key: os.type,                     action: delete }
+      - { key: process.pid,                 action: delete }
+      - { key: process.command_line,        action: delete }
+      - { key: process.command_args,        action: delete }
+      - { key: process.executable.path,     action: delete }
+      - { key: process.owner,               action: delete }
+      - { key: process.runtime.description, action: delete }
+      - { key: process.runtime.name,        action: delete }
+      - { key: process.runtime.version,     action: delete }
+      - { key: telemetry.distro.name,       action: delete }
+      - { key: telemetry.distro.version,    action: delete }
+      - { key: telemetry.sdk.language,      action: delete }
+      - { key: telemetry.sdk.name,          action: delete }
+      - { key: telemetry.sdk.version,       action: delete }
+      - { key: telemetry.auto.version,      action: delete }
+
+  # Health-check chatter (Docker healthchecks, blackbox probes) is not worth storing
+  filter/healthchecks:
+    error_mode: ignore
+    traces:
+      span:
+        - 'IsMatch(attributes["url.path"], "^/(actuator|health).*")'
+        - 'IsMatch(attributes["http.target"], "^/(actuator|health).*")'
+        - 'IsMatch(attributes["http.route"], "^/(actuator|health).*")'
+
+  batch:
+    send_batch_size: 1024
+    timeout: 2s
+
+exporters:
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  # Loki >= 3.0 ingests OTLP natively: resource attrs -> labels / structured
+  # metadata, trace_id + span_id preserved -> Grafana derived field -> Tempo.
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
+
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    metric_expiration: 5m
+    enable_open_metrics: true          # exposes exemplars (metric -> trace)
+    resource_to_telemetry_conversion:
+      enabled: true                    # service.name -> service_name label, etc.
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  telemetry:
+    logs:
+      level: warn
+    metrics:
+      address: 0.0.0.0:8888            # collector's own metrics
+  pipelines:
+    traces:
+      receivers:  [otlp]
+      processors: [memory_limiter, filter/healthchecks, resource/clean, batch]
+      exporters:  [otlp/tempo]
+    metrics:
+      receivers:  [otlp]
+      processors: [memory_limiter, resource/clean, batch]
+      exporters:  [prometheus]
+    logs:
+      receivers:  [otlp]
+      processors: [memory_limiter, resource/clean, batch]
+      exporters:  [otlphttp/loki]
