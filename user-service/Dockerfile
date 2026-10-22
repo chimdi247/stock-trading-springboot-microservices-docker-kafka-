@@ -27,6 +27,7 @@ RUN apt-get update \
 # Configured purely through OTEL_* env vars (see docker-compose.yml and
 # observability/otel/otel-javaagent.properties).
 ADD --chmod=644 https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/download/v${OTEL_AGENT_VERSION}/opentelemetry-javaagent.jar /opt/otel/opentelemetry-javaagent.jar
+RUN chmod 755 /opt/otel
 
 WORKDIR /app
 COPY --from=build /build/target/*.jar /app/app.jar
