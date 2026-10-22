@@ -62,7 +62,7 @@ groups:
                 - evaluator:
                     type: gt
                     params:
-                      - ${ALERT_CPU_THRESHOLD}
+                      - 40
 
       # ─────────────────────── Container memory > 40% ───────────────────────
       - uid: container-memory-high
@@ -106,7 +106,7 @@ groups:
                 - evaluator:
                     type: gt
                     params:
-                      - ${ALERT_MEM_THRESHOLD}
+                      - 40
 
       # ─────────────────────── Node (host) CPU > 40% ───────────────────────
       - uid: node-cpu-high
@@ -148,7 +148,7 @@ groups:
                 - evaluator:
                     type: gt
                     params:
-                      - ${ALERT_CPU_THRESHOLD}
+                      - 40
 
       # ─────────────────────── Node (host) memory > 40% ───────────────────────
       - uid: node-memory-high
@@ -190,4 +190,4 @@ groups:
                 - evaluator:
                     type: gt
                     params:
-                      - ${ALERT_MEM_THRESHOLD}
+                      - 40
