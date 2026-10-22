@@ -43,7 +43,8 @@ processors:
       - { key: telemetry.sdk.version,       action: delete }
       - { key: telemetry.auto.version,      action: delete }
 
-  # Health-check chatter (Docker healthchecks, blackbox probes) is not worth storing
+  # Noise that is not worth storing: health-check chatter (Docker healthchecks,
+  # blackbox probes) and parentless Redis "INFO server" housekeeping spans
   filter/healthchecks:
     error_mode: ignore
     traces:
@@ -51,6 +52,8 @@ processors:
         - 'IsMatch(attributes["url.path"], "^/(actuator|health).*")'
         - 'IsMatch(attributes["http.target"], "^/(actuator|health).*")'
         - 'IsMatch(attributes["http.route"], "^/(actuator|health).*")'
+        - 'attributes["db.system"] == "redis" and attributes["db.statement"] == "INFO server"'
+        - 'attributes["db.system"] == "redis" and attributes["db.query.text"] == "INFO server"'
 
   batch:
     send_batch_size: 1024
