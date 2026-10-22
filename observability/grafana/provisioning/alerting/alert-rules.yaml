@@ -7,6 +7,11 @@ apiVersion: 1
 # CPU %    = CPU used / CPU limit of the container (compose `cpus:`)
 # Memory % = working-set memory / memory limit of the container (compose `mem_limit:`)
 # Only containers that HAVE a limit are evaluated (all app + data containers do).
+#
+# NOTE: the threshold `params` are written in block style (a "- value" list item)
+# instead of the flow style `params: [${ALERT_CPU_THRESHOLD}]`. Inside a flow
+# sequence, YAML treats the `{` of `${...}` as the start of a flow mapping, which
+# caused: "yaml: line 56: did not find expected ',' or ']'".
 
 groups:
   - orgId: 1
@@ -54,7 +59,10 @@ groups:
               type: threshold
               expression: B
               conditions:
-                - evaluator: { type: gt, params: [${ALERT_CPU_THRESHOLD}] }
+                - evaluator:
+                    type: gt
+                    params:
+                      - ${ALERT_CPU_THRESHOLD}
 
       # ─────────────────────── Container memory > 40% ───────────────────────
       - uid: container-memory-high
@@ -95,7 +103,10 @@ groups:
               type: threshold
               expression: B
               conditions:
-                - evaluator: { type: gt, params: [${ALERT_MEM_THRESHOLD}] }
+                - evaluator:
+                    type: gt
+                    params:
+                      - ${ALERT_MEM_THRESHOLD}
 
       # ─────────────────────── Node (host) CPU > 40% ───────────────────────
       - uid: node-cpu-high
@@ -134,7 +145,10 @@ groups:
               type: threshold
               expression: B
               conditions:
-                - evaluator: { type: gt, params: [${ALERT_CPU_THRESHOLD}] }
+                - evaluator:
+                    type: gt
+                    params:
+                      - ${ALERT_CPU_THRESHOLD}
 
       # ─────────────────────── Node (host) memory > 40% ───────────────────────
       - uid: node-memory-high
@@ -173,4 +187,7 @@ groups:
               type: threshold
               expression: B
               conditions:
-                - evaluator: { type: gt, params: [${ALERT_MEM_THRESHOLD}] }
+                - evaluator:
+                    type: gt
+                    params:
+                      - ${ALERT_MEM_THRESHOLD}

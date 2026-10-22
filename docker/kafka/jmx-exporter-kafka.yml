@@ -38,11 +38,15 @@ rules:
     type: GAUGE
 
   # ── Request rate and latency (Produce / FetchConsumer / FetchFollower) ──
+  # `version` is kept as a label: Kafka exposes one mbean per request version, and
+  # without it several samples would share the same name + labels (duplicate series).
+  # Aggregate in queries with: sum by (request) (rate(kafka_network_requestmetrics_requests_total[5m]))
   - pattern: 'kafka.network<type=RequestMetrics, name=RequestsPerSec, request=(Produce|FetchConsumer|FetchFollower), version=(.+)><>Count'
     name: kafka_network_requestmetrics_requests_total
     type: COUNTER
     labels:
       request: "$1"
+      version: "$2"
   - pattern: 'kafka.network<type=RequestMetrics, name=(TotalTimeMs|RequestQueueTimeMs|LocalTimeMs|RemoteTimeMs|ResponseQueueTimeMs|ResponseSendTimeMs), request=(Produce|FetchConsumer|FetchFollower)><>(Mean|50thPercentile|95thPercentile|99thPercentile|Max)'
     name: kafka_network_requestmetrics_$1
     type: GAUGE
@@ -70,7 +74,10 @@ rules:
       partition: "$2"
 
   # ── Consumer group coordinator ────────────────────────────────────
-  - pattern: 'kafka.server<type=group-coordinator-metrics, name=(.+)><>(.+)'
+  # The group-coordinator-metrics mbean has no `name=` key, so the old pattern
+  # (`name=(.+)`) never matched. Attribute names have dashes, which the exporter
+  # converts to underscores.
+  - pattern: 'kafka.server<type=group-coordinator-metrics><>(.+)'
     name: kafka_server_groupcoordinator_$1
     type: GAUGE
 
