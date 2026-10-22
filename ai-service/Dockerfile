@@ -9,9 +9,14 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt \
- # Install the auto-instrumentation packages that match what is installed
- # (FastAPI/Starlette, httpx, logging, ...).
+
+# setuptools is pinned below 81 because `opentelemetry-bootstrap` imports
+# `pkg_resources`, which newer setuptools releases no longer ship.
+# It is installed first, and again after requirements.txt, in case another
+# package upgraded it in between.
+RUN pip install --no-cache-dir "setuptools<81" \
+ && pip install --no-cache-dir -r requirements.txt \
+ && pip install --no-cache-dir "setuptools<81" \
  && opentelemetry-bootstrap -a install
 
 COPY main.py .
